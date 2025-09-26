@@ -231,3 +231,176 @@ if __name__ == "__main__":
     print("Starting Supply Chain Blockchain demo server...")
     print("Visit: http://127.0.0.1:5000")
     app.run(debug=True)
+import time
+import json
+import hashlib
+import uuid
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any
+import streamlit as st
+
+CHAIN_FILE = "chain.json"
+DIFFICULTY = 3
+
+
+@dataclass
+class Transaction:
+    product_id: str
+    from_role: str
+    to_role: str
+    location: str
+    timestamp: float
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Block:
+    index: int
+    timestamp: float
+    transactions: List[Dict[str, Any]]
+    previous_hash: str
+    nonce: int
+    hash: str
+
+    def to_dict(self):
+        return {
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "transactions": self.transactions,
+            "previous_hash": self.previous_hash,
+            "nonce": self.nonce,
+            "hash": self.hash,
+        }
+
+
+class Blockchain:
+    def __init__(self, difficulty: int = DIFFICULTY):
+        self.difficulty = difficulty
+        self.chain: List[Block] = []
+        self.current_transactions: List[Dict[str, Any]] = []
+        self.load_chain()
+
+    def new_transaction(self, tx: Transaction) -> int:
+        self.current_transactions.append(tx.to_dict())
+        return self.last_block.index + 1 if self.chain else 0
+
+    @staticmethod
+    def hash_block(index, timestamp, transactions, previous_hash, nonce) -> str:
+        block_string = json.dumps({
+            "index": index,
+            "timestamp": timestamp,
+            "transactions": transactions,
+            "previous_hash": previous_hash,
+            "nonce": nonce
+        }, sort_keys=True).encode()
+        return hashlib.sha256(block_string).hexdigest()
+
+    def mine_block(self) -> Block:
+        index = self.last_block.index + 1 if self.chain else 0
+        timestamp = time.time()
+        transactions = self.current_transactions.copy()
+        previous_hash = self.last_block.hash if self.chain else "0" * 64
+        nonce = 0
+
+        prefix = "0" * self.difficulty
+        while True:
+            hash_val = self.hash_block(index, timestamp, transactions, previous_hash, nonce)
+            if hash_val.startswith(prefix):
+                break
+            nonce += 1
+
+        block = Block(index=index, timestamp=timestamp, transactions=transactions,
+                      previous_hash=previous_hash, nonce=nonce, hash=hash_val)
+        self.chain.append(block)
+        self.current_transactions = []
+        self.save_chain()
+        return block
+
+    @property
+    def last_block(self) -> Block:
+        return self.chain[-1] if self.chain else None
+
+    def to_dict(self):
+        return [b.to_dict() for b in self.chain]
+
+    def save_chain(self):
+        with open(CHAIN_FILE, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    def load_chain(self):
+        try:
+            with open(CHAIN_FILE, "r") as f:
+                data = json.load(f)
+                self.chain = [Block(**b) for b in data]
+        except (FileNotFoundError, json.JSONDecodeError):
+            genesis_block = Block(index=0, timestamp=time.time(), transactions=[],
+                                  previous_hash="0" * 64, nonce=0,
+                                  hash=self.hash_block(0, time.time(), [], "0" * 64, 0))
+            self.chain = [genesis_block]
+            self.save_chain()
+
+    def get_history_for_product(self, product_id: str) -> List[Dict[str, Any]]:
+        history = []
+        for block in self.chain:
+            for tx in block.transactions:
+                if tx.get("product_id") == product_id:
+                    history.append({
+                        "block_index": block.index,
+                        "block_hash": block.hash,
+                        "timestamp": tx.get("timestamp"),
+                        "from_role": tx.get("from_role"),
+                        "to_role": tx.get("to_role"),
+                        "location": tx.get("location"),
+                        "notes": tx.get("notes")
+                    })
+        for tx in self.current_transactions:
+            if tx.get("product_id") == product_id:
+                history.append({
+                    "block_index": None,
+                    "block_hash": None,
+                    "timestamp": tx.get("timestamp"),
+                    "from_role": tx.get("from_role"),
+                    "to_role": tx.get("to_role"),
+                    "location": tx.get("location"),
+                    "notes": tx.get("notes"),
+                    "pending": True
+                })
+        history.sort(key=lambda x: x["timestamp"])
+        return history
+
+
+# --- Streamlit UI ---
+st.title("📦 Supply Chain Blockchain Tracker")
+
+blockchain = Blockchain()
+
+with st.form("add_txn"):
+    st.subheader("Add a Transaction")
+    product_id = st.text_input("Product ID", value=str(uuid.uuid4())[:8])
+    from_role = st.text_input("From Role", "Farmer")
+    to_role = st.text_input("To Role", "Wholesaler")
+    location = st.text_input("Location", "Farm")
+    notes = st.text_input("Notes", "Harvested")
+    submit = st.form_submit_button("Add & Mine Transaction")
+    if submit:
+        tx = Transaction(product_id, from_role, to_role, location, time.time(), notes)
+        blockchain.new_transaction(tx)
+        block = blockchain.mine_block()
+        st.success(f"Transaction added and mined into block #{block.index}")
+
+st.subheader("Lookup Product History")
+lookup_id = st.text_input("Enter Product ID to Lookup")
+if lookup_id:
+    history = blockchain.get_history_for_product(lookup_id)
+    if history:
+        for h in history:
+            st.write(f"Block: {h.get('block_index')} | From: {h.get('from_role')} → To: {h.get('to_role')} | "
+                     f"Location: {h.get('location')} | Notes: {h.get('notes')} | Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(h['timestamp']))}")
+    else:
+        st.warning("No records found for this Product ID")
+
+st.subheader("Full Blockchain")
+st.json(blockchain.to_dict())
